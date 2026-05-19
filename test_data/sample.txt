@@ -1,0 +1,31 @@
+# 欢迎使用 doc2md
+
+这是一个测试文档，用于验证 txt 转换器的功能。
+
+## 主要特性
+
+本工具支持多种文档格式的转换：
+
+- Word 文档 (.docx)
+- PDF 文档 (.pdf)
+- 纯文本文件 (.txt)
+- Markdown 文件 (.md)
+
+### 表格支持
+
+转换器能够识别文档中的表格并将其转换为 Markdown 表格格式。
+
+## 技术栈
+
+doc2md 使用 Python 构建，核心依赖包括：
+
+- python-docx：解析 Word 文档
+- PyMuPDF：解析 PDF 文档
+- pdfplumber：提取 PDF 表格
+- BeautifulSoup：解析 HTML
+
+> doc2md 的目标是成为一款通用的文档转 Markdown 工具。
+
+---
+
+如需更多信息，请访问项目主页。

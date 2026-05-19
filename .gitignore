@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+.Python
+test_output/
+test_output_batch/
