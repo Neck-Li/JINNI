@@ -1,3 +1,14 @@
+---
+title: JINNI
+emoji: 📄
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 6.14.0
+app_file: app.py
+pinned: false
+---
+
 # doc2md
 
 **Document to Markdown converter** — CLI + Gradio UI, supports 10+ document formats.

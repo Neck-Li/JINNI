@@ -34,6 +34,8 @@ dependencies = [
     "click>=8.0.0",
     "gradio>=4.0.0",
     "openai>=1.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [project.urls]
@@ -46,3 +48,4 @@ include = ["doc2md*"]
 
 [project.scripts]
 doc2md = "doc2md.cli:main"
+doc2md-api = "doc2md.api:main"
