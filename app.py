@@ -10,3 +10,5 @@ from doc2md.app import create_ui
 
 demo = create_ui()
 demo.queue(default_concurrency_limit=5)
+demo.launch(ssr_mode=False)
+
