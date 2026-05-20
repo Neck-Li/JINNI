@@ -1,8 +1,48 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from doc2md.models.document import BlockType, Document
+
+
+def _strip_heading(line: str) -> str:
+    """Remove '#' heading prefix for comparison purposes."""
+    return re.sub(r"^#+\s*", "", line).strip()
+
+
+def _dedup_lines(text: str) -> str:
+    """Remove duplicate or overlapping lines (track last non-empty line)."""
+    lines = text.split("\n")
+    result: list[str] = []
+    last_raw = ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            result.append(line)
+            continue
+        # Compare without heading prefix
+        plain = _strip_heading(stripped)
+        if plain == _strip_heading(last_raw):
+            continue
+        if last_raw and _overlap_ratio(_strip_heading(last_raw), plain) > 0.4:
+            continue
+        result.append(line)
+        last_raw = stripped
+    return "\n".join(result)
+
+
+def _overlap_ratio(a: str, b: str) -> float:
+    """How much of the shorter string is contained in the longer one."""
+    if not a or not b:
+        return 0.0
+    shorter = a if len(a) < len(b) else b
+    longer = b if len(a) < len(b) else a
+    if len(shorter) < 10:
+        return 1.0 if shorter == longer else 0.0
+    if shorter in longer:
+        return len(shorter) / len(longer)
+    return 0.0
 
 
 class MarkdownWriter:
@@ -14,7 +54,6 @@ class MarkdownWriter:
     def write(self, doc: Document, output_path: str) -> None:
         lines: list[str] = []
 
-        # front matter for metadata
         if doc.metadata:
             lines.append("---")
             for k, v in doc.metadata.items():
@@ -38,8 +77,8 @@ class MarkdownWriter:
     @staticmethod
     def _post_process(text: str) -> str:
         """Post-processing fixes for common PDF extraction artifacts."""
-        # I²C glyph often lost in PDF text extraction → "## 2C" → "## I2C"
         text = text.replace("## 2C", "## I2C")
+        text = _dedup_lines(text)
         return text
 
     def _render_block(self, block) -> str:

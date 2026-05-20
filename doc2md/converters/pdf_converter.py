@@ -25,7 +25,7 @@ def convert_pdf(path: str) -> Document:
         page = pdf[page_num]
 
         page_blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
-        page_blocks.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
+        page_blocks = _reorder_by_columns(page_blocks, page.rect.width)
 
         # extract images
         for img_info in page.get_images(full=True):
@@ -147,22 +147,26 @@ def _is_valid_table(tbl_data: list[list]) -> bool:
 
     # --- Heuristic 3: cells are too short on average ---
     # Pdfplumber misdetection: each word/punctuation becomes its own cell.
-    # Real table cells contain phrases like "MOVS r3, #0xE" (3+ words).
+    # Exception: financial tables with numbers (each number is 1 "word").
     meaningful = []
+    numeric_count = 0
     for row in tbl_data:
         for cell in row:
             if cell and cell.strip():
                 text = cell.strip()
-                # skip cells that are just punctuation
                 if not all(c in '，。,．；：、（）！？""''【】《》—…·～＠＃％＆＋＝｀｜' for c in text):
                     meaningful.append(text)
+                    if any(c.isdigit() for c in text):
+                        numeric_count += 1
 
     if not meaningful:
         return False
 
-    avg_words = sum(len(c.split()) for c in meaningful) / len(meaningful)
-    if avg_words < 2:
-        return False
+    # If most cells contain digits -> financial table, skip word count
+    if numeric_count / len(meaningful) < 0.5:
+        avg_words = sum(len(c.split()) for c in meaningful) / len(meaningful)
+        if avg_words < 2:
+            return False
 
     # --- Heuristic 4: too many rows with data only in column 1 ---
     # Hierarchical financial tables often have merged cells that pdfplumber
@@ -178,7 +182,7 @@ def _is_valid_table(tbl_data: list[list]) -> bool:
         if rest_empty and padded[0] and str(padded[0]).strip():
             first_col_only += 1
 
-    if first_col_only / rows >= 0.5:
+    if cols <= 8 and first_col_only / rows >= 0.8:
         return False
 
     return True
@@ -228,6 +232,48 @@ def _in_table_region(bbox, table_bboxes: list[tuple]) -> bool:
         ):
             return True
     return False
+
+
+# ── Layout analysis ────────────────────────────────────────────────
+
+
+import sys as _sys
+def _reorder_by_columns(blocks: list[dict], page_width: float) -> list[dict]:
+    """Detect multi-column layout and reorder blocks to read column by column.
+
+    PyMuPDF sorts by (y, x) which interleaves columns. This function detects
+    column boundaries via x-center clustering and applies column-aware sorting.
+    Falls back to default (y, x) sort for single-column pages.
+    """
+    if len(blocks) < 4:
+        return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    x_centers = []
+    for b in blocks:
+        if b["type"] == 0:
+            x_centers.append((b["bbox"][0] + b["bbox"][2]) / 2)
+
+    if len(x_centers) < 4:
+        return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    sorted_x = sorted(x_centers)
+    min_gap = page_width * 0.15
+    gaps = []
+    for i in range(len(sorted_x) - 1):
+        gap = sorted_x[i + 1] - sorted_x[i]
+        if gap >= min_gap:
+            boundary = (sorted_x[i] + sorted_x[i + 1]) / 2
+            gaps.append(boundary)
+
+    if not gaps:
+        return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    def column_sort_key(b):
+        cx = (b["bbox"][0] + b["bbox"][2]) / 2
+        col = sum(1 for g in gaps if cx > g)
+        return (col, b["bbox"][1], cx)
+
+    return sorted(blocks, key=column_sort_key)
 
 
 # ── Classification ───────────────────────────────────────────────────
@@ -327,7 +373,8 @@ def _validate_heading(text: str) -> str | None:
 def _merge_split_paragraphs(blocks: list[Block]) -> list[Block]:
     """Merge adjacent PARAGRAPH blocks that PyMuPDF split.
 
-    Handles cases like "A" + "temperature sensor" → "A temperature sensor".
+    Handles cases like "A" + "temperature sensor" → "A temperature sensor"
+    and Chinese fragments like "团队合" + "心价值观" → "团队合作价值观".
     """
     if not blocks:
         return blocks
@@ -337,31 +384,53 @@ def _merge_split_paragraphs(blocks: list[Block]) -> list[Block]:
         prev = merged[-1]
 
         if (
-            prev.type == BlockType.PARAGRAPH
-            and b.type == BlockType.PARAGRAPH
+            prev.type in (BlockType.PARAGRAPH, BlockType.HEADING)
+            and b.type in (BlockType.PARAGRAPH, BlockType.HEADING)
             and prev.content
             and b.content
         ):
             p = prev.content
             n = b.content
 
+            # Don't merge two headings (e.g. page number + next TOC entry)
+            if prev.type == BlockType.HEADING and b.type == BlockType.HEADING:
+                merged.append(b)
+                continue
+
             should_merge = False
+            # Very short line ending with letter (like "A" or "or")
             if len(p) <= 3 and p[-1].isalpha():
                 should_merge = True
+            # English: prev ends with lowercase, next starts with lowercase
             elif p[-1].islower() and n[0].islower():
                 should_merge = True
+            # English: prev ends with digit, next starts with lowercase
             elif p[-1].isdigit() and n[0].islower():
                 should_merge = True
+            # English: prev ends with open paren
             elif p[-1] in "([" and n:
+                should_merge = True
+            # CJK: both contain CJK, prev doesn't end in sentence punctuation
+            elif (
+                _has_cjk(p)
+                and _has_cjk(n)
+                and p[-1] not in "。！？）；"
+            ):
                 should_merge = True
 
             if should_merge:
-                prev.content = p + " " + n
-                continue
+                spacer = " " if n[0].isalpha() else ""
+                prev.content = p + spacer + n
+                prev.type = BlockType.PARAGRAPH  # demote heading to paragraph after merge
 
         merged.append(b)
 
     return merged
+
+
+def _has_cjk(text: str) -> bool:
+    """Check if text contains at least one CJK character."""
+    return any(_is_cjk(c) for c in text)
 
 
 def _is_cjk(ch: str) -> bool:
@@ -411,15 +480,14 @@ def _reflow_text(text: str) -> str:
         # Very short previous line ending with letter (like "A" or "I")
         elif prev and len(prev) <= 3 and prev[-1].isalpha() and stripped[0].isalpha():
             result[-1] = prev + " " + stripped
-        # CJK conservative merge: only merge very short lines (likely split chars)
+        # CJK merge: at least one side is short → likely a page-break split
         elif (
             prev
             and _is_cjk(prev[-1])
             and _is_cjk(stripped[0])
-            and len(prev) < 4
-            and len(stripped) < 4
+            
             and prev[-1] not in "。！？）；】》〕"
-            and stripped[0] not in "（(【《〔①②③④⑤⑥⑦⑧⑨⑩"
+            and stripped[0] not in "（(【《〔①②③④⑤⑥⑦⑧⑨⑩第"
         ):
             result[-1] = prev + stripped
         else:
