@@ -234,35 +234,134 @@ def _in_table_region(bbox, table_bboxes: list[tuple]) -> bool:
 
 
 def _classify_and_add_blocks(text_blocks: list[dict], doc: Document) -> None:
-    """Classify text blocks as headings or paragraphs, with reflow."""
+    """Classify text blocks as headings, lists or paragraphs, with reflow + cross-block merge."""
     if not text_blocks:
         return
 
     all_sizes = [b["font_size"] for b in text_blocks if b["font_size"] > 0]
     avg_size = sum(all_sizes) / len(all_sizes) if all_sizes else 12
 
+    # First pass: reflow + classify
+    page_blocks: list[Block] = []
     for tb in text_blocks:
         raw_text = tb["text"]
         font_size = tb["font_size"]
 
-        # reflow: merge word-split lines back into flowing text
         text = _reflow_text(raw_text)
         text = text.strip()
         if not text:
             continue
 
-        # heading detection
+        # List item detection
+        if _is_list_item(text):
+            page_blocks.append(Block(type=BlockType.LIST_ITEM, level=1, content=text))
+            continue
+
+        # Heading detection
         is_large = font_size > avg_size * 1.2
         is_short = len(text) < 100
         is_bold_like = text.isupper() and len(text) > 3
 
         if is_large and is_short:
+            text = _validate_heading(text)
+            if text is None:
+                page_blocks.append(Block(type=BlockType.PARAGRAPH, content=raw_text.strip()))
+                continue
             level = 1 if font_size > avg_size * 1.5 else 2
-            doc.blocks.append(Block(type=BlockType.HEADING, level=level, content=text))
+            page_blocks.append(Block(type=BlockType.HEADING, level=level, content=text))
         elif is_bold_like and is_short:
-            doc.blocks.append(Block(type=BlockType.HEADING, level=2, content=text))
+            text_v = _validate_heading(text)
+            if text_v is None:
+                page_blocks.append(Block(type=BlockType.PARAGRAPH, content=text))
+            else:
+                page_blocks.append(Block(type=BlockType.HEADING, level=2, content=text_v))
         else:
-            doc.blocks.append(Block(type=BlockType.PARAGRAPH, content=text))
+            page_blocks.append(Block(type=BlockType.PARAGRAPH, content=text))
+
+    # Second pass: merge adjacent PARAGRAPH blocks split across PyMuPDF blocks
+    page_blocks = _merge_split_paragraphs(page_blocks)
+
+    for b in page_blocks:
+        doc.blocks.append(b)
+
+
+# ── List detection ──────────────────────────────────────────────────
+
+_LIST_RE = None
+
+
+def _is_list_item(text: str) -> bool:
+    """Check if text looks like a list item (numbered, bullet, lettered)."""
+    import re
+    global _LIST_RE
+    if _LIST_RE is None:
+        _LIST_RE = re.compile(
+            r'^'
+            r'(?:'
+            r'[（(]\d+[）)]'     # Chinese: （1） (1)
+            r'|\d+[、.]'         # Digit: 1、 1.
+            r'|[•·\-*]\s'        # Bullet: • - *
+            r"|[a-zA-Z][.)]\s"   # Letter: a) b.
+            r')'
+        )
+    return bool(_LIST_RE.match(text))
+
+
+# ── Heading validation ──────────────────────────────────────────────
+
+def _validate_heading(text: str) -> str | None:
+    """Return text if it looks like a valid heading, None to downgrade."""
+    if len(text) >= 5:
+        return text
+    has_cjk = any(_is_cjk(c) for c in text)
+    has_alpha = any(c.isalpha() for c in text)
+    if not has_cjk and not has_alpha:
+        return None
+    if not has_cjk and has_alpha and len(text) <= 3:
+        return None
+    return text
+
+
+# ── Cross-block merge ───────────────────────────────────────────────
+
+def _merge_split_paragraphs(blocks: list[Block]) -> list[Block]:
+    """Merge adjacent PARAGRAPH blocks that PyMuPDF split.
+
+    Handles cases like "A" + "temperature sensor" → "A temperature sensor".
+    """
+    if not blocks:
+        return blocks
+
+    merged: list[Block] = [blocks[0]]
+    for b in blocks[1:]:
+        prev = merged[-1]
+
+        if (
+            prev.type == BlockType.PARAGRAPH
+            and b.type == BlockType.PARAGRAPH
+            and prev.content
+            and b.content
+        ):
+            p = prev.content
+            n = b.content
+
+            should_merge = False
+            if len(p) <= 3 and p[-1].isalpha():
+                should_merge = True
+            elif p[-1].islower() and n[0].islower():
+                should_merge = True
+            elif p[-1].isdigit() and n[0].islower():
+                should_merge = True
+            elif p[-1] in "([" and n:
+                should_merge = True
+
+            if should_merge:
+                prev.content = p + " " + n
+                continue
+
+        merged.append(b)
+
+    return merged
 
 
 def _is_cjk(ch: str) -> bool:
@@ -308,6 +407,9 @@ def _reflow_text(text: str) -> str:
             result[-1] = prev + " " + stripped
         # Continuation after comma/semicolon/colon
         elif prev and prev[-1] in ",;:" and stripped[0].islower():
+            result[-1] = prev + " " + stripped
+        # Very short previous line ending with letter (like "A" or "I")
+        elif prev and len(prev) <= 3 and prev[-1].isalpha() and stripped[0].isalpha():
             result[-1] = prev + " " + stripped
         # CJK conservative merge: only merge very short lines (likely split chars)
         elif (

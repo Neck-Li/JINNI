@@ -28,9 +28,19 @@ class MarkdownWriter:
             if md:
                 lines.append(md)
 
+        output = "\n".join(lines)
+        output = self._post_process(output)
+
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("\n".join(lines), encoding="utf-8")
+        output_path.write_text(output, encoding="utf-8")
+
+    @staticmethod
+    def _post_process(text: str) -> str:
+        """Post-processing fixes for common PDF extraction artifacts."""
+        # I²C glyph often lost in PDF text extraction → "## 2C" → "## I2C"
+        text = text.replace("## 2C", "## I2C")
+        return text
 
     def _render_block(self, block) -> str:
         match block.type:
