@@ -7,3 +7,4 @@ build/
 .Python
 test_output/
 test_output_batch/
+test_data/pdfs/images/
