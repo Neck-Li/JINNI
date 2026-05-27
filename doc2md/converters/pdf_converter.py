@@ -237,13 +237,10 @@ def _in_table_region(bbox, table_bboxes: list[tuple]) -> bool:
 # ── Layout analysis ────────────────────────────────────────────────
 
 
-import sys as _sys
 def _reorder_by_columns(blocks: list[dict], page_width: float) -> list[dict]:
-    """Detect multi-column layout and reorder blocks to read column by column.
-
-    PyMuPDF sorts by (y, x) which interleaves columns. This function detects
-    column boundaries via x-center clustering and applies column-aware sorting.
-    Falls back to default (y, x) sort for single-column pages.
+    """Detect multi-column layout via x-center clustering.
+    Falls back to (y,x) sort for single-column. Uses 8% gap threshold
+    with minimum 5 blocks per column guard.
     """
     if len(blocks) < 4:
         return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
@@ -257,21 +254,32 @@ def _reorder_by_columns(blocks: list[dict], page_width: float) -> list[dict]:
         return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
 
     sorted_x = sorted(x_centers)
-    min_gap = page_width * 0.15
-    gaps = []
+    min_gap = page_width * 0.08
+
+    # Find all gaps >= threshold, pick the best column boundaries
+    candidates = []
     for i in range(len(sorted_x) - 1):
         gap = sorted_x[i + 1] - sorted_x[i]
         if gap >= min_gap:
             boundary = (sorted_x[i] + sorted_x[i + 1]) / 2
-            gaps.append(boundary)
+            left = sum(1 for cx in x_centers if cx < boundary)
+            right = sum(1 for cx in x_centers if cx > boundary)
+            if left >= 5 and right >= 5:
+                candidates.append((gap, boundary))
 
-    if not gaps:
+    if not candidates:
         return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    # Sort by gap size descending, take the biggest valid split
+    candidates.sort(key=lambda x: -x[0])
+    boundaries = [b for _, b in candidates[:2]]  # max 3 columns
 
     def column_sort_key(b):
         cx = (b["bbox"][0] + b["bbox"][2]) / 2
-        col = sum(1 for g in gaps if cx > g)
+        col = sum(1 for g in boundaries if cx > g)
         return (col, b["bbox"][1], cx)
+
+    return sorted(blocks, key=column_sort_key)
 
     return sorted(blocks, key=column_sort_key)
 
